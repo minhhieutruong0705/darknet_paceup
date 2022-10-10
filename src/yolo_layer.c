@@ -413,6 +413,16 @@ There are 3 loops:
         3.1. Average the localization loss if the predicted box was responsible for more than one object
         [?] uncovered case: what if they are in the same category
 */
+
+/* add overlapping weight to noobj case
+    - Add Loop 0 before Loop 1:
+        - Collect good predicted boxes following the same selection criteria in Loop 3
+    - In Loop 1:
+        - Before step 1.1: Loop through all the collected boxes:
+            - Calculate intersection/area(pred)
+            - Accumulate the rate
+        - Add the accumuated overlapping rate to the weighting of the objectness loss in step 1.1.
+*/
 void *process_batch(void* ptr)
 {
     {
