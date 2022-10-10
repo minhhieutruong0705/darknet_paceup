@@ -19,8 +19,8 @@ layer make_yolo_layer(int batch, int w, int h, int n, int total, int *mask, int 
     layer l = { (LAYER_TYPE)0 };
     l.type = YOLO;
 
-    l.n = n;
-    l.total = total;
+    l.n = n; // number of masked anchors used in this layer (for every cell)
+    l.total = total; // total number of anchors (for every cell)
     l.batch = batch;
     l.h = h;
     l.w = w;
@@ -28,7 +28,7 @@ layer make_yolo_layer(int batch, int w, int h, int n, int total, int *mask, int 
     l.out_w = l.w;
     l.out_h = l.h;
     l.out_c = l.c;
-    l.classes = classes;
+    l.classes = classes; // number of categories
     l.cost = (float*)xcalloc(1, sizeof(float));
     l.biases = (float*)xcalloc(total * 2, sizeof(float));
     if(mask) l.mask = mask;
@@ -41,7 +41,7 @@ layer make_yolo_layer(int batch, int w, int h, int n, int total, int *mask, int 
     l.bias_updates = (float*)xcalloc(n * 2, sizeof(float));
     l.outputs = h*w*n*(classes + 4 + 1);
     l.inputs = l.outputs;
-    l.max_boxes = max_boxes;
+    l.max_boxes = max_boxes; // maximum number of objects per image during training
     l.truth_size = 4 + 2;
     l.truths = l.max_boxes*l.truth_size;    // 90*(4 + 1);
     l.labels = (int*)xcalloc(batch * l.w*l.h*l.n, sizeof(int));
@@ -129,6 +129,7 @@ void resize_yolo_layer(layer *l, int w, int h)
 #endif
 }
 
+// return a box in a given list
 box get_yolo_box(float *x, float *biases, int n, int index, int i, int j, int lw, int lh, int w, int h, int stride, int new_coords)
 {
     box b;
@@ -171,6 +172,7 @@ static inline float clip_value(float val, const float max_val)
     return val;
 }
 
+// localization loss
 ious delta_yolo_box(box truth, float *x, float *biases, int n, int index, int i, int j, int lw, int lh, int w, int h, float *delta, float scale, int stride, float iou_normalizer, IOU_LOSS iou_loss, int accumulate, float max_delta, int *rewritten_bbox, int new_coords)
 {
     if (delta[index + 0 * stride] || delta[index + 1 * stride] || delta[index + 2 * stride] || delta[index + 3 * stride]) {
@@ -289,13 +291,15 @@ ious delta_yolo_box(box truth, float *x, float *biases, int n, int index, int i,
     return all_ious;
 }
 
+// averaging localization loss in the case the box was responsible for more than one object
 void averages_yolo_deltas(int class_index, int box_index, int stride, int classes, float *delta)
 {
 
     int classes_in_one_box = 0;
     int c;
     for (c = 0; c < classes; ++c) {
-        if (delta[class_index + stride*c] > 0) classes_in_one_box++;
+        if (delta[class_index + stride*c] > 0) classes_in_one_box++; // detect the case by counting positive category losses; 
+        // [?] what if they are in the same category
     }
 
     if (classes_in_one_box > 0) {
@@ -306,9 +310,12 @@ void averages_yolo_deltas(int class_index, int box_index, int stride, int classe
     }
 }
 
+// category loss
 void delta_yolo_class(float *output, float *delta, int index, int class_id, int classes, int stride, float *avg_cat, int focal_loss, float label_smooth_eps, float *classes_multipliers, float cls_normalizer)
 {
     int n;
+    // if the predicted box was responsible for another object already: update only the loss of the target category
+    // [?] what if they are in the same category
     if (delta[index + stride*class_id]){
         float y_true = 1;
         if(label_smooth_eps) y_true = y_true *  (1 - label_smooth_eps) + 0.5*label_smooth_eps;
@@ -320,6 +327,8 @@ void delta_yolo_class(float *output, float *delta, int index, int class_id, int 
         if(avg_cat) *avg_cat += output[index + stride*class_id];
         return;
     }
+
+    // if the predicted box was unsed: positive loss for the target category, and negative loss for the remaining categories
     // Focal loss
     if (focal_loss) {
         // Focal Loss
@@ -354,6 +363,7 @@ void delta_yolo_class(float *output, float *delta, int index, int class_id, int 
     }
 }
 
+// check if there is at least one category of a predicted box having high probability
 int compare_yolo_class(float *output, int classes, int class_index, int stride, float objectness, int class_id, float conf_thresh)
 {
     int j;
@@ -386,6 +396,23 @@ typedef struct train_yolo_args {
     int class_count;
 } train_yolo_args;
 
+/* compute loss
+There are 3 loops:
+    1. Go through all the predicted boxes:
+        1.1. Compute default objectness loss (compared to 0) 
+        1.2. If the predicted box has a matched truth box, set objectness loss to 0 (ignore). A predicted box having a matched truth box is the one
+        having at least one confident category (p > 0.25) and suffiently large iou-score with any truth box.
+    2. Go through all the truth boxes:
+        2.1. Find corresponding cell
+        2.2. Select the best anchor in the cell to compute loss. The best anchor is the one having the highest iou-score with the truth box.
+        2.3. If the best anchor in the mask list: compute loss (objectness, localization, category) for the predicted box corresponding to the anchor.
+        2.4. Go through the remaining masked anchors of the cell:
+            2.4.1 If the masked anchor is good enough: compute loss for the predicted box corresponding to the anchor. A good anchor is the one having
+            iou-score with the truth box larger than iou_thresh
+    3. Go through all the predicted boxes:
+        3.1. Average the localization loss if the predicted box was responsible for more than one object
+        [?] uncovered case: what if they are in the same category
+*/
 void *process_batch(void* ptr)
 {
     {
@@ -414,21 +441,33 @@ void *process_batch(void* ptr)
         //int count = 0;
         //int class_count = 0;
 
+        // Loop 1: loop through all predicted boxes (masked) to compute default objectness loss
         for (j = 0; j < l.h; ++j) {
             for (i = 0; i < l.w; ++i) {
                 for (n = 0; n < l.n; ++n) {
+                    // get indices of the features of a predicted box (category, objectness, localization)
                     const int class_index = entry_index(l, b, n * l.w * l.h + j * l.w + i, 4 + 1);
                     const int obj_index = entry_index(l, b, n * l.w * l.h + j * l.w + i, 4);
                     const int box_index = entry_index(l, b, n * l.w * l.h + j * l.w + i, 0);
+                    
                     const int stride = l.w * l.h;
+                    // get the box localization (x, y, w, h)
                     box pred = get_yolo_box(l.output, l.biases, l.mask[n], box_index, i, j, l.w, l.h, state.net.w, state.net.h, l.w * l.h, l.new_coords);
+                    
                     float best_match_iou = 0;
                     int best_match_t = 0;
                     float best_iou = 0;
                     int best_t = 0;
+                    
+                    // loop through all truth boxes to find a matched truth box (based on box_iou(pred, truth) and ouput[class_index])
                     for (t = 0; t < l.max_boxes; ++t) {
+                        // get truth box localization (x, y, w, h)
                         box truth = float_to_box_stride(state.truth + t * l.truth_size + b * l.truths, 1);
+                        
+                        // if there is no more truth box, stop
                         if (!truth.x) break;  // continue;
+
+                        // get and check input category label
                         int class_id = state.truth[t * l.truth_size + b * l.truths + 4];
                         if (class_id >= l.classes || class_id < 0) {
                             printf("\n Warning: in txt-labels class_id=%d >= classes=%d in cfg-file. In txt-labels class_id should be [from 0 to %d] \n", class_id, l.classes, l.classes - 1);
@@ -437,32 +476,46 @@ void *process_batch(void* ptr)
                             continue; // if label contains class_id more than number of classes in the cfg-file and class_id check garbage value
                         }
 
+                        // [?] why in this loop, should be outside because this loop is for the truth boxes
+                        // get and check predicted objectness
                         float objectness = l.output[obj_index];
                         if (isnan(objectness) || isinf(objectness)) l.output[obj_index] = 0;
+                        
+                        // [?] why in this loop, should be outside because this loop is for the truth boxes
+                        // check if there is at least one category of a predicted box having a probability > 0.25 
                         int class_id_match = compare_yolo_class(l.output, l.classes, class_index, l.w * l.h, objectness, class_id, 0.25f);
 
+                        // compute iou of the predicted box and truth box
                         float iou = box_iou(pred, truth);
+
+                        // get matching truth box (best iou)
                         if (iou > best_match_iou && class_id_match == 1) {
                             best_match_iou = iou;
                             best_match_t = t;
                         }
+
+                        // get best overlapping truth box
                         if (iou > best_iou) {
                             best_iou = iou;
                             best_t = t;
                         }
                     }
 
-                    avg_anyobj += l.output[obj_index];
+                    avg_anyobj += l.output[obj_index]; //** ignore: unused variable
+
+                    // default: objectness truth of all the predicted boxes are negative (compared to 0)
                     l.delta[obj_index] = l.obj_normalizer * (0 - l.output[obj_index]);
-                    if (best_match_iou > l.ignore_thresh) {
-                        if (l.objectness_smooth) {
+                    
+                    // if the predicted box has a matched truth box: change objectness loss to 0 (ignore)
+                    if (best_match_iou > l.ignore_thresh) { // ignore_thresh=0.7
+                        if (l.objectness_smooth) { //** ignore this case: objectness_smooth=0
                             const float delta_obj = l.obj_normalizer * (best_match_iou - l.output[obj_index]);
                             if (delta_obj > l.delta[obj_index]) l.delta[obj_index] = delta_obj;
 
                         }
                         else l.delta[obj_index] = 0;
                     }
-                    else if (state.net.adversarial) {
+                    else if (state.net.adversarial) { //** ignore this case: adversarial_lr=0
                         int stride = l.w * l.h;
                         float scale = pred.w * pred.h;
                         if (scale > 0) scale = sqrt(scale);
@@ -487,7 +540,7 @@ void *process_batch(void* ptr)
                             l.delta[box_index + 3 * stride] += scale * (0 - l.output[box_index + 3 * stride]);
                         }
                     }
-                    if (best_iou > l.truth_thresh) {
+                    if (best_iou > l.truth_thresh) { //** ignore this case: truth_thresh=1.0 and 0<=box_iou(pred, truth)<=1
                         const float iou_multiplier = best_iou * best_iou;// (best_iou - l.truth_thresh) / (1.0 - l.truth_thresh);
                         if (l.objectness_smooth) l.delta[obj_index] = l.obj_normalizer * (iou_multiplier - l.output[obj_index]);
                         else l.delta[obj_index] = l.obj_normalizer * (1 - l.output[obj_index]);
@@ -505,9 +558,13 @@ void *process_batch(void* ptr)
                 }
             }
         }
+        // End of Loop 1
+
+        // Loop 2: loop through all truth boxes to compute loss with the corresponding predicted boxes
         for (t = 0; t < l.max_boxes; ++t) {
+            // get and check truth box
             box truth = float_to_box_stride(state.truth + t * l.truth_size + b * l.truths, 1);
-            if (!truth.x) break;  // continue;
+            if (!truth.x) break;  // continue; // if there is no more truth box, stop
             if (truth.x < 0 || truth.y < 0 || truth.x > 1 || truth.y > 1 || truth.w < 0 || truth.h < 0) {
                 char buff[256];
                 printf(" Wrong label: truth.x = %f, truth.y = %f, truth.w = %f, truth.h = %f \n", truth.x, truth.y, truth.w, truth.h);
@@ -518,16 +575,25 @@ void *process_batch(void* ptr)
             int class_id = state.truth[t * l.truth_size + b * l.truths + 4];
             if (class_id >= l.classes || class_id < 0) continue; // if label contains class_id more than number of classes in the cfg-file and class_id check garbage value
 
+            // init
             float best_iou = 0;
             int best_n = 0;
-            i = (truth.x * l.w);
-            j = (truth.y * l.h);
+
+            // get corresponding cell of the truth box
+            i = (truth.x * l.w); // cell in row i
+            j = (truth.y * l.h); // cell in column j
+            
+            // shift truth box to position (0, 0) to compute iou with the anchors
             box truth_shift = truth;
             truth_shift.x = truth_shift.y = 0;
+
+            // select an anchor for loss calculation. The selected anchor is the one having the best iou with the truth box
             for (n = 0; n < l.total; ++n) {
                 box pred = { 0 };
-                pred.w = l.biases[2 * n] / state.net.w;
-                pred.h = l.biases[2 * n + 1] / state.net.h;
+                pred.w = l.biases[2 * n] / state.net.w; // normalized width: anchor width / input image width  
+                pred.h = l.biases[2 * n + 1] / state.net.h; // normalize width: anchor height / input image height
+                
+                // get anchor having the best iou with the truth box. The loss calculation will base on this anchor box
                 float iou = box_iou(pred, truth_shift);
                 if (iou > best_iou) {
                     best_iou = iou;
@@ -535,13 +601,16 @@ void *process_batch(void* ptr)
                 }
             }
 
+            // check if the selected anchor is in the list of masked anchors
             int mask_n = int_index(l.mask, best_n, l.n);
             if (mask_n >= 0) {
+                // true category
                 int class_id = state.truth[t * l.truth_size + b * l.truths + 4];
                 if (l.map) class_id = l.map[class_id];
 
-                int box_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 0);
-                const float class_multiplier = (l.classes_multipliers) ? l.classes_multipliers[class_id] : 1.0f;
+                // localization loss
+                int box_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 0); // of selected anchor of cell (i, j)
+                const float class_multiplier = (l.classes_multipliers) ? l.classes_multipliers[class_id] : 1.0f; //**ignore // weights for imbalance management between categories
                 ious all_ious = delta_yolo_box(truth, l.output, l.biases, best_n, box_index, i, j, l.w, l.h, state.net.w, state.net.h, l.delta, (2 - truth.w * truth.h), l.w * l.h, l.iou_normalizer * class_multiplier, l.iou_loss, 1, l.max_delta, state.net.rewritten_bbox, l.new_coords);
                 (*state.net.total_bbox)++;
 
@@ -565,15 +634,17 @@ void *process_batch(void* ptr)
                 tot_ciou += all_ious.ciou;
                 tot_ciou_loss += 1 - all_ious.ciou;
 
-                int obj_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 4);
-                avg_obj += l.output[obj_index];
-                if (l.objectness_smooth) {
+                // objectness loss
+                int obj_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 4); // of selected anchor of cell (i, j)
+                avg_obj += l.output[obj_index]; //** ignore: unused variable
+                if (l.objectness_smooth) { //** ignore this case: objectness_smooth=0
                     float delta_obj = class_multiplier * l.obj_normalizer * (1 - l.output[obj_index]);
                     if (l.delta[obj_index] == 0) l.delta[obj_index] = delta_obj;
                 }
                 else l.delta[obj_index] = class_multiplier * l.obj_normalizer * (1 - l.output[obj_index]);
 
-                int class_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 4 + 1);
+                // category loss
+                int class_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 4 + 1); // of selected anchor of cell (i, j)
                 delta_yolo_class(l.output, l.delta, class_index, class_id, l.classes, l.w * l.h, &avg_cat, l.focal_loss, l.label_smooth_eps, l.classes_multipliers, l.cls_normalizer);
 
                 //printf(" label: class_id = %d, truth.x = %f, truth.y = %f, truth.w = %f, truth.h = %f \n", class_id, truth.x, truth.y, truth.w, truth.h);
@@ -585,20 +656,26 @@ void *process_batch(void* ptr)
                 if (all_ious.iou > .75) recall75 += 1;
             }
 
-            // iou_thresh
+            // loop through remaining masked anchors to compute loss if they are good enough (multiple anchors for one object). The anchor is good
+            // if it has iou-score with the truth box larger than iou_thresh.
+            // iou_thresh; iou_thresh=0.213
             for (n = 0; n < l.total; ++n) {
                 int mask_n = int_index(l.mask, n, l.n);
                 if (mask_n >= 0 && n != best_n && l.iou_thresh < 1.0f) {
+                    // normalize the masked anchor
                     box pred = { 0 };
                     pred.w = l.biases[2 * n] / state.net.w;
                     pred.h = l.biases[2 * n + 1] / state.net.h;
+                    // compute iou; iou_thresh_kind="iou"
                     float iou = box_iou_kind(pred, truth_shift, l.iou_thresh_kind); // IOU, GIOU, MSE, DIOU, CIOU
                     // iou, n
 
+                    // if the iou is good enough: treat the anchor as the best anchor
                     if (iou > l.iou_thresh) {
                         int class_id = state.truth[t * l.truth_size + b * l.truths + 4];
                         if (l.map) class_id = l.map[class_id];
 
+                        // localization loss
                         int box_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 0);
                         const float class_multiplier = (l.classes_multipliers) ? l.classes_multipliers[class_id] : 1.0f;
                         ious all_ious = delta_yolo_box(truth, l.output, l.biases, n, box_index, i, j, l.w, l.h, state.net.w, state.net.h, l.delta, (2 - truth.w * truth.h), l.w * l.h, l.iou_normalizer * class_multiplier, l.iou_loss, 1, l.max_delta, state.net.rewritten_bbox, l.new_coords);
@@ -617,6 +694,7 @@ void *process_batch(void* ptr)
                         tot_ciou += all_ious.ciou;
                         tot_ciou_loss += 1 - all_ious.ciou;
 
+                        // objectness loss
                         int obj_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 4);
                         avg_obj += l.output[obj_index];
                         if (l.objectness_smooth) {
@@ -625,6 +703,7 @@ void *process_batch(void* ptr)
                         }
                         else l.delta[obj_index] = class_multiplier * l.obj_normalizer * (1 - l.output[obj_index]);
 
+                        // category loss
                         int class_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 4 + 1);
                         delta_yolo_class(l.output, l.delta, class_index, class_id, l.classes, l.w * l.h, &avg_cat, l.focal_loss, l.label_smooth_eps, l.classes_multipliers, l.cls_normalizer);
 
@@ -636,7 +715,9 @@ void *process_batch(void* ptr)
                 }
             }
         }
+        // End of Loop 2
 
+        // Loop 3: loop through all predicted boxes (masked) to average the localization loss if the box was responsible for more than one object
         if (l.iou_thresh < 1.0f) {
             // averages the deltas obtained by the function: delta_yolo_box()_accumulate
             for (j = 0; j < l.h; ++j) {
@@ -647,13 +728,13 @@ void *process_batch(void* ptr)
                         int class_index = entry_index(l, b, n*l.w*l.h + j*l.w + i, 4 + 1);
                         const int stride = l.w*l.h;
 
-                        if (l.delta[obj_index] != 0)
+                        if (l.delta[obj_index] != 0) // if the box is not ignored
                             averages_yolo_deltas(class_index, box_index, stride, l.classes, l.delta);
                     }
                 }
             }
         }
-
+        // End of Loop 3
     }
 
     return 0;
