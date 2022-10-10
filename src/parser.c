@@ -475,6 +475,7 @@ layer parse_yolo(list *options, size_params params)
     l.new_coords = option_find_int_quiet(options, "new_coords", 0);
     l.iou_normalizer = option_find_float_quiet(options, "iou_normalizer", 0.75);
     l.obj_normalizer = option_find_float_quiet(options, "obj_normalizer", 1);
+    l.obj_normalizer_noobj = option_find_float_quiet(options, "obj_normalizer_noobj", 0.75);
     l.cls_normalizer = option_find_float_quiet(options, "cls_normalizer", 1);
     l.delta_normalizer = option_find_float_quiet(options, "delta_normalizer", 1);
     char *iou_loss = option_find_str_quiet(options, "iou_loss", "mse");   //  "iou");

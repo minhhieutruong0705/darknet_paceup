@@ -504,7 +504,7 @@ void *process_batch(void* ptr)
                     avg_anyobj += l.output[obj_index]; //** ignore: unused variable
 
                     // default: objectness truth of all the predicted boxes are negative (compared to 0)
-                    l.delta[obj_index] = l.obj_normalizer * (0 - l.output[obj_index]);
+                    l.delta[obj_index] = l.obj_normalizer_noobj * (0 - l.output[obj_index]);
                     
                     // if the predicted box has a matched truth box: change objectness loss to 0 (ignore)
                     if (best_match_iou > l.ignore_thresh) { // ignore_thresh=0.7
@@ -519,7 +519,7 @@ void *process_batch(void* ptr)
                         int stride = l.w * l.h;
                         float scale = pred.w * pred.h;
                         if (scale > 0) scale = sqrt(scale);
-                        l.delta[obj_index] = scale * l.obj_normalizer * (0 - l.output[obj_index]);
+                        l.delta[obj_index] = scale * l.obj_normalizer_noobj * (0 - l.output[obj_index]);
                         int cl_id;
                         int found_object = 0;
                         for (cl_id = 0; cl_id < l.classes; ++cl_id) {

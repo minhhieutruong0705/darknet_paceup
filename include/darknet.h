@@ -430,6 +430,7 @@ struct layer {
     float uc_normalizer;
     float iou_normalizer;
     float obj_normalizer;
+    float obj_normalizer_noobj;
     float cls_normalizer;
     float delta_normalizer;
     IOU_LOSS iou_loss;
