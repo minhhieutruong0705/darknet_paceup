@@ -421,7 +421,7 @@ void *process_batch(void* ptr)
         network_state state = args->state;
         int b = args->b;
 
-        int i, j, t, n;
+        int i, j, t, n, s;
 
         //printf(" b = %d \n", b, b);
 
@@ -440,6 +440,82 @@ void *process_batch(void* ptr)
         float avg_anyobj = 0;
         //int count = 0;
         //int class_count = 0;
+
+        box selected_boxes[l.max_boxes * l.n];
+        int selected_boxes_count = 0;
+
+        // Loop 0: loop through all truth boxes to select overlapping candidates. They are good predicted boxes which are selected 
+        // following the same criteria as in Loop 2
+        for (t = 0; t < l.max_boxes; ++t) {
+            // get and check truth box
+            box truth = float_to_box_stride(state.truth + t * l.truth_size + b * l.truths, 1);
+            if (!truth.x) break;  // continue; // if there is no more truth box, stop
+            if (truth.x < 0 || truth.y < 0 || truth.x > 1 || truth.y > 1 || truth.w < 0 || truth.h < 0) {
+                char buff[256];
+                printf(" Wrong label: truth.x = %f, truth.y = %f, truth.w = %f, truth.h = %f \n", truth.x, truth.y, truth.w, truth.h);
+                sprintf(buff, "echo \"Wrong label: truth.x = %f, truth.y = %f, truth.w = %f, truth.h = %f\" >> bad_label.list",
+                    truth.x, truth.y, truth.w, truth.h);
+                system(buff);
+            }
+        
+            // init
+            float best_iou = 0;
+            int best_n = 0;
+
+            // get corresponding cell of the truth box
+            i = (truth.x * l.w); // cell in row i
+            j = (truth.y * l.h); // cell in column j
+            
+            // shift truth box to position (0, 0) to compute iou with the anchors
+            box truth_shift = truth;
+            truth_shift.x = truth_shift.y = 0;
+
+            // select an anchor for loss calculation. The selected anchor is the one having the best iou with the truth box
+            for (n = 0; n < l.total; ++n) {
+                box pred = { 0 };
+                pred.w = l.biases[2 * n] / state.net.w; // normalized width: anchor width / input image width  
+                pred.h = l.biases[2 * n + 1] / state.net.h; // normalize width: anchor height / input image height
+                
+                // get anchor having the best iou with the truth box. The loss calculation will base on this anchor box
+                float iou = box_iou(pred, truth_shift);
+                if (iou > best_iou) {
+                    best_iou = iou;
+                    best_n = n;
+                }
+            }
+
+            // check if the selected anchor is in the list of masked anchors
+            int mask_n = int_index(l.mask, best_n, l.n);
+            if (mask_n >= 0) {
+                int box_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 0);
+                selected_boxes[selected_boxes_count] = get_yolo_box(l.output, l.biases, best_n, box_index, i, j, l.w, l.h, state.net.w, state.net.h, l.w * l.h, l.new_coords);
+                ++selected_boxes_count;
+            }
+
+            // loop through remaining masked anchors if they are good enough (multiple anchors for one object). The anchor is good
+            // if it has iou-score with the truth box larger than iou_thresh.
+            // iou_thresh; iou_thresh=0.213
+            for (n = 0; n < l.total; ++n) {
+                int mask_n = int_index(l.mask, n, l.n);
+                if (mask_n >= 0 && n != best_n && l.iou_thresh < 1.0f) {
+                    // normalize the masked anchor
+                    box pred = { 0 };
+                    pred.w = l.biases[2 * n] / state.net.w;
+                    pred.h = l.biases[2 * n + 1] / state.net.h;
+                    // compute iou; iou_thresh_kind="iou"
+                    float iou = box_iou_kind(pred, truth_shift, l.iou_thresh_kind); // IOU, GIOU, MSE, DIOU, CIOU
+                    // iou, n
+
+                    // if the iou is good enough: take it
+                    if (iou > l.iou_thresh) {
+                        int box_index = entry_index(l, b, mask_n * l.w * l.h + j * l.w + i, 0);
+                        selected_boxes[selected_boxes_count] = get_yolo_box(l.output, l.biases, best_n, box_index, i, j, l.w, l.h, state.net.w, state.net.h, l.w * l.h, l.new_coords);
+                        ++selected_boxes_count;
+                    }
+                }
+            }
+        }
+        // End Loop 0
 
         // Loop 1: loop through all predicted boxes (masked) to compute default objectness loss
         for (j = 0; j < l.h; ++j) {
@@ -503,8 +579,17 @@ void *process_batch(void* ptr)
 
                     avg_anyobj += l.output[obj_index]; //** ignore: unused variable
 
+                    // compute overlapping weight for noobj case
+                    float overlapping_weight = 0;
+                    for (s = 0; s < selected_boxes_count; ++s) {
+                        float intersection = box_intersection(pred, selected_boxes[s]);
+                        float pred_area = pred.w * pred.h;
+                        float overlapping_rate = intersection / (pred_area);
+                        overlapping_weight += overlapping_rate;
+                    }
+
                     // default: objectness truth of all the predicted boxes are negative (compared to 0)
-                    l.delta[obj_index] = l.obj_normalizer_noobj * (0 - l.output[obj_index]);
+                    l.delta[obj_index] = (l.obj_normalizer_noobj + overlapping_weight) * (0 - l.output[obj_index]);
                     
                     // if the predicted box has a matched truth box: change objectness loss to 0 (ignore)
                     if (best_match_iou > l.ignore_thresh) { // ignore_thresh=0.7
@@ -519,7 +604,7 @@ void *process_batch(void* ptr)
                         int stride = l.w * l.h;
                         float scale = pred.w * pred.h;
                         if (scale > 0) scale = sqrt(scale);
-                        l.delta[obj_index] = scale * l.obj_normalizer_noobj * (0 - l.output[obj_index]);
+                        l.delta[obj_index] = scale * (l.obj_normalizer_noobj + overlapping_weight) * (0 - l.output[obj_index]);
                         int cl_id;
                         int found_object = 0;
                         for (cl_id = 0; cl_id < l.classes; ++cl_id) {
