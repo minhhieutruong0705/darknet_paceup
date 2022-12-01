@@ -451,7 +451,9 @@ void *process_batch(void* ptr)
         //int count = 0;
         //int class_count = 0;
 
-        box selected_boxes[l.max_boxes * l.n];
+        int max_selected_boxes = l.max_boxes * l.n; 
+        box *selected_boxes;
+        selected_boxes = xmalloc(sizeof(box) * max_selected_boxes);
         int selected_boxes_count = 0;
 
         // Loop 0: loop through all truth boxes to select overlapping candidates. They are good predicted boxes which are selected 
@@ -830,6 +832,8 @@ void *process_batch(void* ptr)
             }
         }
         // End of Loop 3
+
+        free(selected_boxes);
     }
 
     return 0;
