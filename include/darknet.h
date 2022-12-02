@@ -114,6 +114,11 @@ typedef enum {
 
 // parser.h
 typedef enum {
+    SUM, EXPO
+} WEIGHT_COMBINE;
+
+// parser.h
+typedef enum {
     DEFAULT_NMS, GREEDY_NMS, DIOU_NMS, CORNERS_NMS
 } NMS_KIND;
 
@@ -438,6 +443,8 @@ struct layer {
     NMS_KIND nms_kind;
     float beta_nms;
     YOLO_POINT yolo_point;
+    int olap_noobj;
+    WEIGHT_COMBINE weight_combine;
 
     char *align_bit_weights_gpu;
     float *mean_arr_gpu;

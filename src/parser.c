@@ -475,10 +475,12 @@ layer parse_yolo(list *options, size_params params)
     l.new_coords = option_find_int_quiet(options, "new_coords", 0);
     l.iou_normalizer = option_find_float_quiet(options, "iou_normalizer", 0.75);
     l.obj_normalizer = option_find_float_quiet(options, "obj_normalizer", 1);
-    l.obj_normalizer_noobj = option_find_float_quiet(options, "obj_normalizer_noobj", 0.75);
+    l.obj_normalizer_noobj = option_find_float_quiet(options, "obj_normalizer_noobj", 1); // 0.9
     l.cls_normalizer = option_find_float_quiet(options, "cls_normalizer", 1);
     l.delta_normalizer = option_find_float_quiet(options, "delta_normalizer", 1);
     char *iou_loss = option_find_str_quiet(options, "iou_loss", "mse");   //  "iou");
+    l.olap_noobj = option_find_int_quiet(options, "olap_noobj", 0);
+    char *weight_combine = option_find_str_quiet(options, "weight_combine", "sum");
 
     if (strcmp(iou_loss, "mse") == 0) l.iou_loss = MSE;
     else if (strcmp(iou_loss, "giou") == 0) l.iou_loss = GIOU;
@@ -487,6 +489,12 @@ layer parse_yolo(list *options, size_params params)
     else l.iou_loss = IOU;
     fprintf(stderr, "[yolo] params: iou loss: %s (%d), iou_norm: %2.2f, obj_norm: %2.2f, noobj_norm: %2.2f, cls_norm: %2.2f, delta_norm: %2.2f, scale_x_y: %2.2f\n",
         iou_loss, l.iou_loss, l.iou_normalizer, l.obj_normalizer, l.obj_normalizer_noobj, l.cls_normalizer, l.delta_normalizer, l.scale_x_y);
+
+    if (strcmp(weight_combine, "sum") == 0) l.weight_combine = SUM;
+    else if (strcmp(weight_combine, "expo") == 0) l.weight_combine = EXPO;
+    else l.weight_combine = SUM;
+    fprintf(stderr, "overlapping weight for noobj: %d, weight_combine: %s (%d)\n",
+        l.olap_noobj, weight_combine, l.weight_combine);
 
     char *iou_thresh_kind_str = option_find_str_quiet(options, "iou_thresh_kind", "iou");
     if (strcmp(iou_thresh_kind_str, "iou") == 0) l.iou_thresh_kind = IOU;

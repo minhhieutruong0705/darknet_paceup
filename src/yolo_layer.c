@@ -363,6 +363,33 @@ void delta_yolo_class(float *output, float *delta, int index, int class_id, int 
     }
 }
 
+// combine different weights together
+float compute_combined_weight(float default_weight, float secondary_weight, WEIGHT_COMBINE weight_combine){
+    float combined_weight;
+    if (weight_combine == SUM) combined_weight = default_weight + secondary_weight;
+    else if (weight_combine == EXPO) combined_weight = default_weight * exp(secondary_weight);
+    else combined_weight = default_weight;
+    return combined_weight;
+}
+
+// compute overlapping weight of a predicted box with candidate boxes
+float compute_overlapping_weight(box pred_box, box* candidate_boxes, int candidate_count) {
+    float olap_weight, intersection, pred_area, single_oplap_rate;
+
+    // area of the predicted box
+    pred_area = pred_box.w * pred_box.h;
+    olap_weight = 0;
+
+    // compute intersection/pred_area of pred_box with every candidate boxes; then, sum them together
+    int i = 0;
+    for (i = 0; i < candidate_count; ++i) {
+        intersection = box_intersection(pred_box, candidate_boxes[i]);
+        single_oplap_rate = intersection / pred_area;
+        olap_weight += single_oplap_rate;
+    }
+    return olap_weight;
+}
+
 // check if there is at least one category of a predicted box having high probability
 int compare_yolo_class(float *output, int classes, int class_index, int stride, float objectness, int class_id, float conf_thresh)
 {
@@ -431,7 +458,7 @@ void *process_batch(void* ptr)
         network_state state = args->state;
         int b = args->b;
 
-        int i, j, t, n, s;
+        int i, j, t, n;
 
         //printf(" b = %d \n", b, b);
 
@@ -592,16 +619,12 @@ void *process_batch(void* ptr)
                     avg_anyobj += l.output[obj_index]; //** ignore: unused variable
 
                     // compute overlapping weight for noobj case
-                    float overlapping_weight = 0;
-                    for (s = 0; s < selected_boxes_count; ++s) {
-                        float intersection = box_intersection(pred, selected_boxes[s]);
-                        float pred_area = pred.w * pred.h;
-                        float overlapping_rate = intersection / (pred_area);
-                        overlapping_weight += overlapping_rate;
-                    }
+                    float olap_weight = 0;
+                    if (l.olap_noobj) olap_weight = compute_overlapping_weight(pred, selected_boxes, selected_boxes_count);
 
                     // default: objectness truth of all the predicted boxes are negative (compared to 0)
-                    l.delta[obj_index] = (l.obj_normalizer_noobj + overlapping_weight) * (0 - l.output[obj_index]);
+                    float noobj_weight = compute_combined_weight(l.obj_normalizer_noobj, olap_weight, l.weight_combine);
+                    l.delta[obj_index] = noobj_weight * (0 - l.output[obj_index]);
                     
                     // if the predicted box has a matched truth box: change objectness loss to 0 (ignore)
                     if (best_match_iou > l.ignore_thresh) { // ignore_thresh=0.7
@@ -616,7 +639,8 @@ void *process_batch(void* ptr)
                         int stride = l.w * l.h;
                         float scale = pred.w * pred.h;
                         if (scale > 0) scale = sqrt(scale);
-                        l.delta[obj_index] = scale * (l.obj_normalizer_noobj + overlapping_weight) * (0 - l.output[obj_index]);
+                        float noobj_weight = compute_combined_weight(l.obj_normalizer_noobj, olap_weight, l.weight_combine);
+                        l.delta[obj_index] = scale * noobj_weight * (0 - l.output[obj_index]);
                         int cl_id;
                         int found_object = 0;
                         for (cl_id = 0; cl_id < l.classes; ++cl_id) {
