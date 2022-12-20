@@ -480,6 +480,7 @@ layer parse_yolo(list *options, size_params params)
     l.delta_normalizer = option_find_float_quiet(options, "delta_normalizer", 1);
     char *iou_loss = option_find_str_quiet(options, "iou_loss", "mse");   //  "iou");
     l.olap_noobj = option_find_int_quiet(options, "olap_noobj", 0);
+    l.olap_normalizer = option_find_float_quiet(options, "olap_normalizer", 1);
     char *weight_combine = option_find_str_quiet(options, "weight_combine", "sum");
 
     if (strcmp(iou_loss, "mse") == 0) l.iou_loss = MSE;
@@ -487,8 +488,8 @@ layer parse_yolo(list *options, size_params params)
     else if (strcmp(iou_loss, "diou") == 0) l.iou_loss = DIOU;
     else if (strcmp(iou_loss, "ciou") == 0) l.iou_loss = CIOU;
     else l.iou_loss = IOU;
-    fprintf(stderr, "[yolo] params: iou loss: %s (%d), iou_norm: %2.2f, obj_norm: %2.2f, noobj_norm: %2.2f, cls_norm: %2.2f, delta_norm: %2.2f, scale_x_y: %2.2f\n",
-        iou_loss, l.iou_loss, l.iou_normalizer, l.obj_normalizer, l.obj_normalizer_noobj, l.cls_normalizer, l.delta_normalizer, l.scale_x_y);
+    fprintf(stderr, "[yolo] params: iou loss: %s (%d), iou_norm: %2.2f, obj_norm: %2.2f, noobj_norm: %2.2f, olap_norm: %2.2f, cls_norm: %2.2f, delta_norm: %2.2f, scale_x_y: %2.2f\n",
+        iou_loss, l.iou_loss, l.iou_normalizer, l.obj_normalizer, l.obj_normalizer_noobj, l.olap_normalizer, l.cls_normalizer, l.delta_normalizer, l.scale_x_y);
 
     if (strcmp(weight_combine, "sum") == 0) l.weight_combine = SUM;
     else if (strcmp(weight_combine, "expo") == 0) l.weight_combine = EXPO;

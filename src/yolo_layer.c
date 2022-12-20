@@ -373,7 +373,7 @@ float compute_combined_weight(float default_weight, float secondary_weight, WEIG
 }
 
 // compute overlapping weight of a predicted box with candidate boxes
-float compute_overlapping_weight(box pred_box, box* candidate_boxes, int candidate_count) {
+float compute_overlapping_weight(box pred_box, box* candidate_boxes, int candidate_count, float olap_normalizer) {
     float olap_weight, intersection, pred_area, single_oplap_rate;
 
     // area of the predicted box
@@ -387,7 +387,7 @@ float compute_overlapping_weight(box pred_box, box* candidate_boxes, int candida
         single_oplap_rate = intersection / pred_area;
         olap_weight += single_oplap_rate;
     }
-    return olap_weight;
+    return olap_weight * olap_normalizer;
 }
 
 // check if there is at least one category of a predicted box having high probability
@@ -620,7 +620,7 @@ void *process_batch(void* ptr)
 
                     // compute overlapping weight for noobj case
                     float olap_weight = 0;
-                    if (l.olap_noobj) olap_weight = compute_overlapping_weight(pred, selected_boxes, selected_boxes_count);
+                    if (l.olap_noobj) olap_weight = compute_overlapping_weight(pred, selected_boxes, selected_boxes_count, l.olap_normalizer);
 
                     // default: objectness truth of all the predicted boxes are negative (compared to 0)
                     float noobj_weight = compute_combined_weight(l.obj_normalizer_noobj, olap_weight, l.weight_combine);
@@ -1068,8 +1068,8 @@ void forward_yolo_layer(const layer l, network_state state)
 
         loss /= l.batch;
 
-        fprintf(stderr, "v3 (%s loss, Normalizer: (iou: %.2f, obj: %.2f, noobj: %.2f, cls: %.2f) Region %d Avg (IOU: %f), count: %d, total_loss = %f \n",
-            (l.iou_loss == MSE ? "mse" : (l.iou_loss == GIOU ? "giou" : "iou")), l.iou_normalizer, l.obj_normalizer, l.obj_normalizer_noobj, l.cls_normalizer, state.index, tot_iou / count, count, loss);
+        fprintf(stderr, "v3 (%s loss, Normalizer: (iou: %.2f, obj: %.2f, noobj: %.2f, olap: %.2f, cls: %.2f) Region %d Avg (IOU: %f), count: %d, total_loss = %f \n",
+            (l.iou_loss == MSE ? "mse" : (l.iou_loss == GIOU ? "giou" : "iou")), l.iou_normalizer, l.obj_normalizer, l.obj_normalizer_noobj, l.olap_normalizer, l.cls_normalizer, state.index, tot_iou / count, count, loss);
     }
     else {
         // show detailed output
@@ -1124,8 +1124,8 @@ void forward_yolo_layer(const layer l, network_state state)
         classification_loss /= l.batch;
         iou_loss /= l.batch;
 
-        fprintf(stderr, "v3 (%s loss, Normalizer: (iou: %.2f, obj: %.2f, noobj: %.2f, cls: %.2f) Region %d Avg (IOU: %f), count: %d, class_loss = %f, iou_loss = %f, total_loss = %f \n",
-            (l.iou_loss == MSE ? "mse" : (l.iou_loss == GIOU ? "giou" : "iou")), l.iou_normalizer, l.obj_normalizer, l.obj_normalizer_noobj, l.cls_normalizer, state.index, tot_iou / count, count, classification_loss, iou_loss, loss);
+        fprintf(stderr, "v3 (%s loss, Normalizer: (iou: %.2f, obj: %.2f, noobj: %.2f, olap: %.2f, cls: %.2f) Region %d Avg (IOU: %f), count: %d, class_loss = %f, iou_loss = %f, total_loss = %f \n",
+            (l.iou_loss == MSE ? "mse" : (l.iou_loss == GIOU ? "giou" : "iou")), l.iou_normalizer, l.obj_normalizer, l.obj_normalizer_noobj, l.olap_normalizer, l.cls_normalizer, state.index, tot_iou / count, count, classification_loss, iou_loss, loss);
 
         //fprintf(stderr, "v3 (%s loss, Normalizer: (iou: %.2f, cls: %.2f) Region %d Avg (IOU: %f, GIOU: %f), Class: %f, Obj: %f, No Obj: %f, .5R: %f, .75R: %f, count: %d, class_loss = %f, iou_loss = %f, total_loss = %f \n",
         //    (l.iou_loss == MSE ? "mse" : (l.iou_loss == GIOU ? "giou" : "iou")), l.iou_normalizer, l.obj_normalizer, state.index, tot_iou / count, tot_giou / count, avg_cat / class_count, avg_obj / count, avg_anyobj / (l.w*l.h*l.n*l.batch), recall / count, recall75 / count, count,

@@ -444,6 +444,7 @@ struct layer {
     float beta_nms;
     YOLO_POINT yolo_point;
     int olap_noobj;
+    float olap_normalizer;
     WEIGHT_COMBINE weight_combine;
 
     char *align_bit_weights_gpu;
